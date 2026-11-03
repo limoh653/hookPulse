@@ -1,0 +1,59 @@
+/*
+ * ==============================================================================
+ * FILE: backend/tsconfig.json
+ * PURPOSE:
+ *   Configures the TypeScript compiler (tsc) for the HookPulse backend application.
+ *   Enforces strict type safety and defines path aliases for Clean Architecture.
+ *
+ * RESPONSIBILITIES:
+ *   - Enforce modern ECMAScript compilation target (ES2022).
+ *   - Enable experimental decorators and decorator metadata required by NestJS IoC.
+ *   - Map path aliases (@domain/*, @application/*, @infrastructure/*, @common/*)
+ *     to prevent fragile relative paths like "../../../../domain".
+ *   - Turn on strict null checks and type checking to catch bugs at compile-time.
+ *
+ * WHY IT EXISTS:
+ *   Without a strict tsconfig, implicit 'any' types, unhandled undefined checks,
+ *   and circular relative path imports introduce runtime bugs into distributed systems.
+ *
+ * INTERACTIONS:
+ *   - Read by the NestJS CLI (`nest build`), `tsc`, `ts-node`, and `jest` when running
+ *     the backend and background worker services.
+ *
+ * IMPLEMENTATION NOTES:
+ *   - "strict": true guarantees all strict type-checking options are active.
+ *   - "emitDecoratorMetadata": true is mandatory for NestJS dependency injection.
+ * ==============================================================================
+ */
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "declaration": true,
+    "removeComments": false,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2022",
+    "sourceMap": true,
+    "outDir": "./dist",
+    "baseUrl": "./",
+    "incremental": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "strictNullChecks": true,
+    "noImplicitAny": true,
+    "strictBindCallApply": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "paths": {
+      "@domain/*": ["src/domain/*"],
+      "@application/*": ["src/application/*"],
+      "@infrastructure/*": ["src/infrastructure/*"],
+      "@interfaces/*": ["src/interfaces/*"],
+      "@common/*": ["src/common/*"]
+    }
+  },
+  "include": ["src/**/*", "test/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

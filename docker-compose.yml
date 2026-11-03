@@ -1,0 +1,160 @@
+# ==============================================================================
+# FILE: docker-compose.yml
+# PURPOSE:
+#   Orchestrates local and containerized development infrastructure for HookPulse.
+#   Spins up PostgreSQL 16, Redis 7, the Backend (Ingestion API & Worker), and
+#   the Next.js Frontend Dashboard in an isolated, networked environment.
+#
+# RESPONSIBILITIES:
+#   - Provision PostgreSQL 16 with automated schema initialization and persistent volumes.
+#   - Provision Redis 7 with Append-Only File (AOF) persistence enabled for BullMQ durability.
+#   - Set up container health checks so dependent services only start when dependencies are healthy.
+#   - Define the shared bridge network ("hookpulse-net") enabling microservice communication.
+#
+# WHY IT EXISTS:
+#   To eliminate "it works on my machine" syndrome and allow any engineer to clone
+#   the repository and spin up the complete end-to-end architecture with a single
+#   command (`docker compose up --build`).
+#
+# INTERACTIONS:
+#   - Mounts ./backend/src/infrastructure/database/schema.sql into PostgreSQL's
+#     /docker-entrypoint-initdb.d/ to auto-apply database migrations on initial startup.
+#   - Injects environment variables consumed by backend/src/common/config/env.validation.ts.
+#
+# IMPLEMENTATION NOTES:
+#   - PostgreSQL uses port 5432, Redis uses port 6379, Backend uses port 3001, Frontend uses port 3000.
+#   - Health checks ensure that the backend does not crash on startup attempting to connect
+#     to a database or Redis instance that is still initializing.
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Primary Relational Database (PostgreSQL 16)
+  # Durable storage for tenants, registered endpoints, event audit logs, and delivery attempts.
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: hookpulse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-hookpulse_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-hookpulse_secret_pass}
+      POSTGRES_DB: ${DB_NAME:-hookpulse_db}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      # Named volume guarantees database data survives container restarts/rebuilds
+      - postgres_data:/var/lib/postgresql/data
+      # Mount initial SQL schema: PostgreSQL automatically executes files in this dir on first run
+      - ./backend/src/infrastructure/database/schema.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    networks:
+      - hookpulse-net
+    healthcheck:
+      # Ensures Postgres is fully ready to accept client TCP connections before backend starts
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-hookpulse_user} -d ${DB_NAME:-hookpulse_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 2. In-Memory Cache & Message Broker (Redis 7)
+  # High-speed backing store for BullMQ worker queues, Token Bucket rate limiting, and 24h idempotency.
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: hookpulse-redis
+    restart: unless-stopped
+    # --appendonly yes ensures every write is appended to disk log for zero data loss during restarts
+    # --requirepass secures the Redis instance with a pre-shared authentication secret
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-hookpulse_redis_secret}
+      --maxmemory-policy noeviction
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      # Persists Redis RDB snapshots and AOF logs across restarts
+      - redis_data:/data
+    networks:
+      - hookpulse-net
+    healthcheck:
+      # Tests authentication and heartbeat response ("PONG")
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-hookpulse_redis_secret}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ----------------------------------------------------------------------------
+  # 3. HookPulse Backend (Ingestion API & Worker Dispatch Engine)
+  # Handles HTTP ingestion, event deduplication, BullMQ queues, HMAC signing, and outbound delivery.
+  # ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: hookpulse-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3001
+      DATABASE_URL: postgres://${DB_USER:-hookpulse_user}:${DB_PASSWORD:-hookpulse_secret_pass}@postgres:5432/${DB_NAME:-hookpulse_db}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-hookpulse_redis_secret}
+      JWT_SECRET: ${JWT_SECRET:-hookpulse_super_secret_master_encryption_key_32bytes}
+      BULLMQ_CONCURRENCY: ${BULLMQ_CONCURRENCY:-20}
+      OUTBOUND_TIMEOUT_MS: ${OUTBOUND_TIMEOUT_MS:-5000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - hookpulse-net
+
+  # ----------------------------------------------------------------------------
+  # 4. HookPulse Frontend (Next.js 14 Developer Dashboard)
+  # Provides real-time WebSocket delivery telemetry, delivery logs, and single-click manual replays.
+  # ----------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: hookpulse-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NEXT_PUBLIC_WS_URL: ws://localhost:3001
+    depends_on:
+      - backend
+    networks:
+      - hookpulse-net
+
+# ------------------------------------------------------------------------------
+# Persistent Storage Volumes
+# ------------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    name: hookpulse_postgres_data
+    driver: local
+  redis_data:
+    name: hookpulse_redis_data
+    driver: local
+
+# ------------------------------------------------------------------------------
+# Bridge Network for Inter-Container Communication
+# ------------------------------------------------------------------------------
+networks:
+  hookpulse-net:
+    name: hookpulse-network
+    driver: bridge
